@@ -1,7 +1,7 @@
 import os
 from typing import Optional
 from langchain_core.tools import tool
-from app.sandbox import sandbox  # Day 1 Docker sandbox execution instance
+from app.sandbox import run_command  # Day 1 Docker sandbox execution instance
 
 # ==========================================
 # 1. DIRECTORY STRUCTURE TOOL
@@ -20,7 +20,7 @@ def run_tree(path: str = ".", depth: int = 3) -> str:
     ignore_pattern = "node_modules|.git|__pycache__|.venv|*.egg-info|dist|build|.pytest_cache"
     cmd = f"tree -L {depth} -I '{ignore_pattern}' {path}"
     
-    result = sandbox.execute_command(cmd)
+    result = run_command(cmd)
     if result["exit_code"] != 0:
         return f"Error executing tree: {result['stderr']}"
     return result["stdout"]
@@ -43,7 +43,7 @@ def run_ripgrep(pattern: str, path: str = ".", context_lines: int = 2, max_count
     # -i: case insensitive, -C: context lines, -n: line numbers, --max-count: limit matches
     cmd = f"rg -i -n '{pattern}' -C {context_lines} --max-count {max_count} --color=never {path}"
     
-    result = sandbox.execute_command(cmd)
+    result = run_command(cmd)
     
     if result["exit_code"] == 1:
         return f"No matches found for pattern: '{pattern}'"
@@ -77,7 +77,7 @@ def find_files(pattern: str, path: str = ".") -> str:
         f"| head -n 30"
     )
     
-    result = sandbox.execute_command(cmd)
+    result = run_command(cmd)
     if result["exit_code"] != 0:
         return f"Error finding files: {result['stderr']}"
         
@@ -106,7 +106,7 @@ def read_file_snippet(file_path: str, start_line: int = 1, end_line: int = 60) -
     # Uses sed to extract line slice efficiently inside the container
     cmd = f"sed -n '{start_line},{end_line}p' {file_path}"
     
-    result = sandbox.execute_command(cmd)
+    result = run_command(cmd)
     if result["exit_code"] != 0:
         return f"Error reading file {file_path}: {result['stderr']}"
         

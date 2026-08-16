@@ -1,18 +1,50 @@
-import os
-from typing import Dict, Any
-from langchain_community.chat_models import ChatLiteLLM
+import litellm
+from typing import Any, Dict, List
 
-def get_chat_model(config: Dict[str, Any]) -> ChatLiteLLM:
+def get_chat_model(config: Dict[str, Any], messages: List[Dict[str, Any]], tools: List[Any] = None) -> Any:
     """
-    Instantiates a ChatLiteLLM instance based on dynamic user runtime flags.
-    Supports: ollama/qwen2.5-coder, gpt-4o, claude-3-5-sonnet, groq/llama-3.1-70b
+    Calls OpenAI's Responses API directly using LiteLLM, 
+    automatically serializing LangChain StructuredTools into JSON schemas.
     """
-    model_name = config.get("llm_model", "ollama/qwen2.5-coder")
-    api_base = config.get("api_base", None)
+    model_name = config.get("llm_model", "openai/gpt-5.6-luna")
+    api_key = config.get("api_key") or config.get("api_token")
+    reasoning_effort = config.get("reasoning_effort", "medium")
     
-    return ChatLiteLLM(
+    kwargs = {}
+    if api_key:
+        kwargs["api_key"] = api_key
+    if config.get("api_base"):
+        kwargs["api_base"] = config.get("api_base")
+
+    # Convert LangChain StructuredTools to OpenAI function JSON schemas if needed
+    formatted_tools = None
+    if tools:
+        formatted_tools = []
+        for tool in tools:
+            # If it's a LangChain StructuredTool object, use its built-in schema generator
+            if hasattr(tool, "args_schema") and hasattr(tool, "name") and hasattr(tool, "description"):
+                schema = {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.args_schema.schema() if tool.args_schema else {}
+                    }
+                }
+                formatted_tools.append(schema)
+            elif isinstance(tool, dict):
+                # Already a dictionary schema
+                formatted_tools.append(tool)
+
+    # Call litellm.responses with JSON-serializable tools
+    response = litellm.responses(
         model=model_name,
-        api_base=api_base,
-        temperature=0.0,  # Deterministic output for tool navigation
-        max_tokens=2000
+        input=messages,
+        tools=formatted_tools,
+        reasoning={
+            "effort": reasoning_effort
+        },
+        **kwargs
     )
+    
+    return response

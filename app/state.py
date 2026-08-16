@@ -1,9 +1,8 @@
 import operator
-from typing import TypedDict, List, Dict, Any, Annotated
+from typing import TypedDict, List, Dict, Any, Annotated, Union
 import json
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
 from app.sandbox import run_command
-from app.state import MonorepoState
 from app.llm import get_chat_model
 from app.template import RepoNavigatorResponse, SearchResultItem
 from app.helper_tools import parse_ripgrep_output
@@ -13,12 +12,13 @@ class MonorepoState(TypedDict):
     # Initial Inputs
     issue_title: str
     issue_description: str
+    config: Dict[str, Any]
 
     # Discovery Phase
     project_root: str
     target_packages: List[str]       # Affected sub-packages
     filesystem_map: str              # Visual structure via `tree`
-    search_results: Dict[str, str]   # Outputs from ripgrep
+    search_results: Union[List[SearchResultItem], Dict[str, Any]]   # Outputs from ripgrep
     relevant_files: List[str]        # Resolved absolute/relative file paths
 
     # Execution Phase
@@ -43,16 +43,40 @@ TOOL_MAP = {
     "read_file_snippet": read_file_snippet
 }
 
+
+def convert_langchain_messages_to_responses_input(messages: List[Any]) -> List[Dict[str, Any]]:
+    """
+    Converts LangChain message objects into the payload format 
+    expected by the OpenAI / LiteLLM Responses API.
+    """
+    formatted_input = []
+    for msg in messages:
+        if isinstance(msg, SystemMessage):
+            formatted_input.append({"role": "developer", "content": msg.content})
+        elif isinstance(msg, HumanMessage):
+            formatted_input.append({"role": "user", "content": msg.content})
+        elif isinstance(msg, AIMessage):
+            item = {"role": "assistant"}
+            if msg.content:
+                item["content"] = msg.content
+            if getattr(msg, "tool_calls", None):
+                item["tool_calls"] = msg.tool_calls
+            formatted_input.append(item)
+        elif isinstance(msg, ToolMessage):
+            formatted_input.append({
+                "role": "tool",
+                "tool_call_id": msg.tool_call_id,
+                "content": msg.content
+            })
+    return formatted_input
+
+
 def repo_navigator_node(state: MonorepoState) -> MonorepoState:
     """
-    LangGraph Node: Autonomously explores the repository, executes tree/ripgrep,
-    and updates MonorepoState with RepoNavigatorResponse attributes.
+    LangGraph Node: Autonomously explores the repository using litellm.responses(),
+    executes tree/ripgrep, and updates MonorepoState.
     """
     config = state.get("config", {})
-    llm = get_chat_model(config)
-    
-    # Bind navigation tools to the model slot
-    llm_with_tools = llm.bind_tools(NAVIGATOR_TOOLS)
     
     system_prompt = (
         "You are RepoNavigator, an autonomous codebase exploration agent.\n"
@@ -76,17 +100,26 @@ def repo_navigator_node(state: MonorepoState) -> MonorepoState:
     
     # 1. Autonomous Discovery Loop
     for _ in range(max_search_turns):
-        response = llm_with_tools.invoke(messages)
-        messages.append(response)
+        formatted_messages = convert_langchain_messages_to_responses_input(messages)
+        
+        # Invoke LiteLLM Responses API directly with tools
+        response = get_chat_model(config, messages=formatted_messages, tools=NAVIGATOR_TOOLS)
+        
+        choice = response.choices[0]
+        message_output = choice.message
+        tool_calls = getattr(message_output, "tool_calls", None)
+        
+        ai_msg = AIMessage(content=message_output.content or "", tool_calls=tool_calls or [])
+        messages.append(ai_msg)
         
         # Break if the model did not request additional tool calls
-        if not response.tool_calls:
+        if not tool_calls:
             break
             
-        for tool_call in response.tool_calls:
-            tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
-            tool_id = tool_call["id"]
+        for tool_call in tool_calls:
+            tool_name = tool_call.get("name") if isinstance(tool_call, dict) else tool_call.function.name
+            tool_args = tool_call.get("args") if isinstance(tool_call, dict) else json.loads(tool_call.function.arguments)
+            tool_id = tool_call.get("id") if isinstance(tool_call, dict) else tool_call.id
             
             if tool_name in TOOL_MAP:
                 raw_output = TOOL_MAP[tool_name].invoke(tool_args)
@@ -101,27 +134,34 @@ def repo_navigator_node(state: MonorepoState) -> MonorepoState:
                 
             messages.append(ToolMessage(content=str(raw_output), tool_call_id=tool_id))
 
-    # 2. Enforce Structured Output using RepoNavigatorResponse
-    structured_llm = llm.with_structured_output(RepoNavigatorResponse)
-    
+    # 2. Enforce Structured Consolidation Output
     final_prompt = (
         "Consolidate your findings from the search tool results above.\n"
-        "Return the target packages, filesystem map, key search results, and exact relevant files."
+        "Return a valid JSON object matching the requested schema keys: "
+        "target_packages (list of strings), filesystem_map (string), search_results (list), relevant_files (list of strings)."
     )
+    messages.append(HumanMessage(content=final_prompt))
     
-    decision: RepoNavigatorResponse = structured_llm.invoke(messages + [HumanMessage(content=final_prompt)])
+    formatted_messages = convert_langchain_messages_to_responses_input(messages)
+    final_response = get_chat_model(config, messages=formatted_messages, tools=None)
     
+    content_text = final_response.choices[0].message.content
+    try:
+        parsed_data = json.loads(content_text)
+    except Exception:
+        parsed_data = {}
+
     # 3. Update MonorepoState with the schema fields
-    state["target_packages"] = decision.target_packages
+    state["target_packages"] = parsed_data.get("target_packages", [])
     
-    # Fallback to captured tool execution if LLM summary trimmed the raw tree
-    state["filesystem_map"] = decision.filesystem_map or (
+    # Fallback to captured tool execution if summary trimmed the raw tree
+    state["filesystem_map"] = parsed_data.get("filesystem_map") or (
         captured_tree_outputs[-1] if captured_tree_outputs else ""
     )
     
-    # Merge LLM-selected search results with parsed tool results
-    state["search_results"] = decision.search_results or captured_search_results
-    state["relevant_files"] = decision.relevant_files
+    # Merge search results
+    state["search_results"] = parsed_data.get("search_results") or captured_search_results
+    state["relevant_files"] = parsed_data.get("relevant_files", [])
 
     return state
 
@@ -150,11 +190,10 @@ def fetch_file_contents(file_paths: List[str]) -> Dict[str, str]:
 
 def planner_node(state: MonorepoState) -> MonorepoState:
     """
-    LangGraph Node: Analyzes relevant files and issue context, drafts a deterministic
-    fix, generates precise search/replace diff blocks, and specifies verification tests.
+    LangGraph Node: Analyzes relevant files and issue context using litellm.responses(),
+    drafts a deterministic fix, and generates search/replace diff blocks.
     """
     config = state.get("config", {})
-    llm = get_chat_model(config)
     
     # Step 1: Read the current content of relevant files from sandbox
     relevant_files = state.get("relevant_files", [])
@@ -164,7 +203,7 @@ def planner_node(state: MonorepoState) -> MonorepoState:
     system_prompt = (
         "You are an expert Monorepo Software Engineer and Planner.\n"
         "Your task is to analyze the issue and target files, formulate a step-by-step fix, "
-        "and generate exact search-and-replace code diffs.\n\n"
+        "and generate exact search-and-replace code diffs in JSON format.\n\n"
         "STRICT PATCHING RULES:\n"
         "1. NEVER rewrite the entire file. Only output minimal search-and-replace blocks.\n"
         "2. The `search` block MUST exist verbatim in the target file, including exact whitespace and indentation.\n"
@@ -199,18 +238,24 @@ Target Packages: {state.get('target_packages', [])}
 {retry_context}
 """
 
-    # Step 4: Call Model with Structured Output
-    structured_llm = llm.with_structured_output(PlannerCoderResponse)
+    messages = [
+        {"role": "developer", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+
+    # Step 4: Call Model via Responses API
+    response = get_chat_model(config, messages=messages, tools=None)
+    content_text = response.choices[0].message.content
     
-    response: PlannerCoderResponse = structured_llm.invoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_prompt)
-    ])
-    
+    try:
+        parsed_response = json.loads(content_text)
+    except Exception:
+        parsed_response = {}
+        
     # Step 5: Update Graph State
     state["file_contents"] = file_contents
-    state["proposed_plan"] = response.proposed_plan
-    state["test_command"] = response.test_command
-    state["diffs_to_apply"] = [diff.model_dump() for diff in response.diffs_to_apply]
+    state["proposed_plan"] = parsed_response.get("proposed_plan", "")
+    state["test_command"] = parsed_response.get("test_command", "")
+    state["diffs_to_apply"] = parsed_response.get("diffs_to_apply", [])
     
     return state
