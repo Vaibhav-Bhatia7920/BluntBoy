@@ -6,3 +6,6 @@ openai
 langchain
 langchain-community
 litellm
+tree-sitter>=0.23,<0.24
+tree-sitter-python>=0.23,<0.24
+tree-sitter-javascript>=0.23,<0.24

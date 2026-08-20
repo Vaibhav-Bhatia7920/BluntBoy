@@ -58,3 +58,12 @@ class PlannerCoderResponse(BaseModel):
     diffs_to_apply: List[DiffBlock] = Field(
         description="List of deterministic search-and-replace blocks to apply to the repository."
     )
+
+
+class PatcherNodeResponse(BaseModel):
+    proposed_plan: str = Field(
+        description="Execution-phase plan describing the exact diffs that should be applied next."
+    )
+    diffs_to_apply: List[DiffBlock] = Field(
+        description="Execution-phase diffs to apply or hand off to the next step."
+    )

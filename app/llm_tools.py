@@ -21,6 +21,7 @@ def run_tree(path: str = ".", depth: int = 3) -> str:
     cmd = f"tree -L {depth} -I '{ignore_pattern}' {path}"
     
     result = run_command(cmd)
+    print(result)
     if result["exit_code"] != 0:
         return f"Error executing tree: {result['stderr']}"
     return result["stdout"]

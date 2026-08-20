@@ -20,11 +20,11 @@ def get_response(issue_title: str, issue_description: str):
         project_root="",
         target_packages=[],
         filesystem_map="",     
+        symbol_map="",
         search_results={},
         relevant_files=[],
 
         proposed_plan="",
-        file_contents={},
         diffs_to_apply=[],
 
         test_command="",
